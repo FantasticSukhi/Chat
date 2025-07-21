@@ -127,15 +127,37 @@ def rate_limit(func):
         return await func(update, context)
     return wrapper
 
-# Gemini Initialization
-genai.configure(
-    api_key=GEMINI_API_KEY,
-    transport='rest',
-    client_options={"api_endpoint": "generativelanguage.googleapis.com"}
-)
-
-# Use the updated model name
-model = genai.GenerativeModel('gemini-1.5-pro-latest')
+async def generate_gemini_response(prompt: str) -> Optional[str]:
+    """Generate response using Gemini 2.0 Flash API"""
+    try:
+        async with httpx.AsyncClient(timeout=GEMINI_CONFIG["timeout"]) as client:
+            response = await client.post(
+                f"{GEMINI_CONFIG['base_url']}/{GEMINI_CONFIG['api_version']}/models/{GEMINI_CONFIG['model_name']}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={
+                    "contents": [{
+                        "parts": [{
+                            "text": prompt
+                        }]
+                    }],
+                    "safetySettings": [
+                        {
+                            "category": category,
+                            "threshold": threshold
+                        } for category, threshold in GEMINI_CONFIG["safety_settings"].items()
+                    ]
+                },
+                headers={"Content-Type": "application/json"}
+            )
+            
+            response.raise_for_status()
+            return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
+    except Exception as e:
+        logger.error(f"Generation error: {str(e)}")
+    return None
 
 # --- Utility Functions ---
 def is_admin(user_id: int) -> bool:
