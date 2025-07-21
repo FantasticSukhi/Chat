@@ -26,7 +26,7 @@ BOT_CONFIG = {
 
 # Gemini Configuration
 GEMINI_CONFIG = {
-    "model_name": "gemini-pro",
+    "model_name": "gemini-1.5-pro-latest",
     "temperature": 0.7,
     "top_p": 0.9,
     "top_k": 40,
