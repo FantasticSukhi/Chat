@@ -26,11 +26,10 @@ BOT_CONFIG = {
 
 # Gemini Configuration
 GEMINI_CONFIG = {
-    "model_name": "gemini-1.5-pro-latest",
-    "temperature": 0.7,
-    "top_p": 0.9,
-    "top_k": 40,
-    "max_output_tokens": 2048,
+    "model_name": "gemini-2.0-flash",  # Using your specified model
+    "api_version": "v1beta",
+    "base_url": "https://generativelanguage.googleapis.com",
+    "timeout": 30,
     "safety_settings": {
         "HARASSMENT": "BLOCK_NONE",
         "HATE_SPEECH": "BLOCK_NONE",
