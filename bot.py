@@ -1,10 +1,10 @@
+#!/usr/bin/env python3
 import os
 import time
 import logging
 import asyncio
 from functools import wraps
 from collections import defaultdict
-from typing import Optional, List
 
 import google.generativeai as genai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -14,6 +14,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
+    CallbackContext
 )
 
 from config import (
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 def setup_logging():
     logging.basicConfig(
         level=LOGGING_CONFIG["log_level"],
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(LOGGING_CONFIG["log_file"], encoding='utf-8'),
             logging.StreamHandler()
@@ -42,17 +43,21 @@ def setup_logging():
 
 setup_logging()
 
-# --- Rate Limiting ---
+# --- Conversation Management ---
+user_conversations = defaultdict(list)
 user_message_times = defaultdict(list)
 
+# --- Rate Limiting ---
 def rate_limit(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         now = time.time()
         
+        # Clear old timestamps
         user_message_times[user_id] = [t for t in user_message_times[user_id] if now - t < 1]
         
+        # Check rate limit
         if len(user_message_times[user_id]) >= BOT_CONFIG["rate_limit_per_user"]:
             await update.message.reply_text("🚫 You're sending messages too fast. Please wait a moment.")
             logger.warning(f"Rate limit exceeded for user {user_id}")
@@ -60,28 +65,6 @@ def rate_limit(func):
         
         user_message_times[user_id].append(now)
         return await func(update, context)
-    return wrapper
-
-# --- Conversation History ---
-user_conversations = defaultdict(list)
-
-def manage_conversation_history(func):
-    @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        user_message = update.message.text
-        
-        user_conversations[user_id].append({"role": "user", "content": user_message})
-        
-        if len(user_conversations[user_id]) > BOT_CONFIG["conversation_history_size"]:
-            user_conversations[user_id] = user_conversations[user_id][-BOT_CONFIG["conversation_history_size"]:]
-        
-        result = await func(update, context)
-        
-        if result and isinstance(result, str):
-            user_conversations[user_id].append({"role": "assistant", "content": result})
-        
-        return result
     return wrapper
 
 # --- Initialize Gemini ---
@@ -92,16 +75,13 @@ model = genai.GenerativeModel(GEMINI_CONFIG["model_name"])
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-def split_long_message(text: str, max_length: int = BOT_CONFIG["max_message_length"]) -> List[str]:
-    return [text[i:i+max_length] for i in range(0, len(text), max_length)]
-
 async def send_long_message(update: Update, text: str):
-    parts = split_long_message(text)
-    for part in parts:
-        await update.message.reply_text(part)
+    max_len = BOT_CONFIG["max_message_length"]
+    for i in range(0, len(text), max_len):
+        await update.message.reply_text(text[i:i+max_len])
 
 # --- Command Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     if str(user.id) in BOT_CONFIG["blocked_users"]:
@@ -109,16 +89,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     
     keyboard = [
-        [InlineKeyboardButton("🌐 Network", url=BOT_CONFIG["network_url"]),
-         InlineKeyboardButton("🆘 Support", url=BOT_CONFIG["support_url"])],
-        [InlineKeyboardButton("🌐 Website", url=BOT_CONFIG["website_url"]),
-         InlineKeyboardButton("📜 Commands", callback_data="help")]
+        [
+            InlineKeyboardButton("🌐 Network", url=BOT_CONFIG["network_url"]),
+            InlineKeyboardButton("🆘 Support", url=BOT_CONFIG["support_url"]),
+        ],
+        [
+            InlineKeyboardButton("🌐 Website", url=BOT_CONFIG["website_url"]),
+            InlineKeyboardButton("📜 Commands", callback_data="help")
+        ]
     ]
     
     welcome_message = f"""
 👋 Hello {user.mention_html()}!
 
-I'm an advanced AI chatbot powered by Google Gemini. I can understand and respond in multiple languages with context awareness.
+I'm an advanced AI chatbot powered by Google Gemini. I can understand and respond in multiple languages.
 
 💡 <b>Features:</b>
 - Multilingual conversations
@@ -137,7 +121,7 @@ I'm an advanced AI chatbot powered by Google Gemini. I can understand and respon
     )
     logger.info(f"New user started: {user.id} - {user.full_name}")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 <b>🤖 Bot Commands:</b>
 
@@ -160,7 +144,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 """
     await update.message.reply_html(help_text)
 
-async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_time = time.time()
     message = await update.message.reply_text("🏓 Pong!")
     end_time = time.time()
@@ -169,18 +153,23 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.edit_text(f"🏓 Pong!\n⏳ Bot Latency: {latency}ms\n🔄 Gemini API: Online")
 
 @rate_limit
-@manage_conversation_history
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_message = update.message.text
     
     if str(user.id) in BOT_CONFIG["blocked_users"]:
         await update.message.reply_text("🚫 You are blocked from using this bot.")
-        return None
+        return
     
     try:
         logger.info(f"Processing message from {user.id}: {user_message[:50]}...")
         
+        # Manage conversation history
+        user_conversations[user.id].append({"role": "user", "content": user_message})
+        if len(user_conversations[user.id]) > BOT_CONFIG["conversation_history_size"]:
+            user_conversations[user.id] = user_conversations[user.id][-BOT_CONFIG["conversation_history_size"]:]
+        
+        # Generate response
         response = model.generate_content(
             user_message,
             generation_config=genai.types.GenerationConfig(
@@ -195,13 +184,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ]
         )
         
+        # Send response
         await send_long_message(update, response.text)
-        return response.text
+        
+        # Store bot response in history
+        user_conversations[user.id].append({"role": "assistant", "content": response.text})
         
     except Exception as e:
         logger.error(f"Error processing message: {str(e)}", exc_info=True)
         await update.message.reply_text("⚠️ An error occurred while processing your message. Please try again later.")
-        return None
 
 # --- Admin Commands ---
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -244,24 +235,31 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"📢 Broadcast sent to {broadcast_count} users.")
 
-# --- Error Handler ---
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# --- System Functions ---
+async def post_init(application: Application):
+    """Send startup notification to owner"""
+    try:
+        await application.bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"🤖 Bot @{BOT_CONFIG['bot_username']} started successfully!\n"
+                 f"Server Time: {time.ctime()}"
+        )
+        await application.bot.set_my_commands([
+            BotCommand("start", "Start the bot"),
+            BotCommand("help", "Show help"),
+            BotCommand("ping", "Check bot status"),
+            BotCommand("clear", "Clear your history"),
+        ])
+    except Exception as e:
+        logger.error(f"Failed to send startup message: {str(e)}")
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}", exc_info=True)
     if update.effective_message:
         await update.effective_message.reply_text("⚠️ An unexpected error occurred. The admin has been notified.")
 
-# --- Setup Commands Menu ---
-async def post_init(application: Application):
-    await application.bot.set_my_commands([
-        BotCommand("start", "Start the bot"),
-        BotCommand("help", "Show help"),
-        BotCommand("ping", "Check bot status"),
-        BotCommand("clear", "Clear your history"),
-    ])
-
-# --- Main Application ---
 def create_application():
-    """Create and configure the Telegram application."""
+    """Create and configure the Telegram application"""
     return Application.builder() \
         .token(BOT_TOKEN) \
         .connect_timeout(30) \
@@ -270,14 +268,9 @@ def create_application():
         .pool_timeout(30) \
         .post_init(post_init) \
         .build()
-        
-    return Application.builder() \
-        .token(BOT_TOKEN) \
-        .defaults(defaults) \
-        .post_init(post_init) \
-        .build()
 
 def setup_handlers(application):
+    """Set up all command and message handlers"""
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("ping", ping))
@@ -288,32 +281,48 @@ def setup_handlers(application):
     application.add_error_handler(error_handler)
 
 async def run_bot():
-    application = create_application()
-    setup_handlers(application)
+    """Main bot running function with restart capability"""
+    retry_count = 0
+    max_retries = 5
     
-    await application.initialize()
-    await application.start()
-    logger.info("Bot is now running continuously...")
-    
-    # Keep the application running
-    while True:
-        await asyncio.sleep(3600)
+    while retry_count < max_retries:
+        try:
+            application = create_application()
+            setup_handlers(application)
+            
+            await application.initialize()
+            await application.start()
+            logger.info("Bot is now running and responding to messages...")
+            
+            # Keep the application running
+            while True:
+                await asyncio.sleep(3600)  # Sleep for 1 hour
+                
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"Bot crashed (attempt {retry_count}/{max_retries}): {str(e)}")
+            
+            if retry_count < max_retries:
+                logger.info(f"Restarting in 10 seconds...")
+                await asyncio.sleep(10)
+            else:
+                logger.critical("Maximum restart attempts reached. Bot stopped.")
+                break
+        finally:
+            try:
+                await application.stop()
+                await application.shutdown()
+            except:
+                pass
 
 def main():
+    """Entry point for the bot"""
     if not BOT_TOKEN:
-        logger.error("Invalid Telegram bot token!")
+        logger.error("No Telegram bot token provided!")
         return
-
-    # Run the bot with restart capability
-    while True:
-        try:
-            asyncio.run(run_bot())
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
-            break
-        except Exception as e:
-            logger.error(f"Fatal error: {str(e)}. Restarting in 10 seconds...")
-            time.sleep(10)
+    
+    # Run the bot with asyncio
+    asyncio.run(run_bot())
 
 if __name__ == "__main__":
     main()
