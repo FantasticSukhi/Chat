@@ -233,6 +233,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /ping - Check bot latency
 /stats - Get bot statistics (Admin only)
 /clear - Clear conversation history
+/verify - Test API Connection (Admin Only)
 
 <b>🎯 Features:</b>
 - Supports 100+ languages
@@ -264,38 +265,25 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @rate_limit
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all text messages"""
-    await log_update(update)
-    user = update.effective_user
     user_message = update.message.text
     
-    if str(user.id) in BOT_CONFIG["blocked_users"]:
-        await update.message.reply_text("🚫 You are blocked from using this bot.")
-        return
-    
     try:
-        logger.info(f"Processing message from {user.id}: {user_message[:50]}...")
+        logger.info(f"Processing message with Gemini 2.0 Flash: {user_message[:100]}...")
+        response = await generate_gemini_response(user_message)
         
-        # Manage conversation history
-        user_conversations[user.id].append({"role": "user", "content": user_message})
-        if len(user_conversations[user.id]) > BOT_CONFIG["conversation_history_size"]:
-            user_conversations[user.id] = user_conversations[user.id][-BOT_CONFIG["conversation_history_size"]:]
-        
-        # Generate response
-        response = await asyncio.to_thread(
-            model.generate_content,
-            user_message,
-            generation_config=genai.types.GenerationConfig(
-                temperature=GEMINI_CONFIG["temperature"],
-                top_p=GEMINI_CONFIG["top_p"],
-                top_k=GEMINI_CONFIG["top_k"],
-                max_output_tokens=GEMINI_CONFIG["max_output_tokens"],
-            ),
-            safety_settings=[
-                {"category": k, "threshold": v} 
-                for k, v in GEMINI_CONFIG["safety_settings"].items()
-            ]
-        )
+        if response:
+            await send_long_message(update, response)
+            # Store in conversation history
+            user_conversations[update.effective_user.id].append({
+                "role": "assistant",
+                "content": response
+            })
+        else:
+            await update.message.reply_text("⚠️ Could not generate response. The AI service might be busy.")
+            
+    except Exception as e:
+        logger.error(f"Message handling failed: {str(e)}")
+        await update.message.reply_text("🚨 An error occurred. Please try again later.")
         
         # Send response
         await send_long_message(update, response.text)
@@ -355,6 +343,18 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Failed to send broadcast to {user_id}: {str(e)}")
     
     await update.message.reply_text(f"📢 Broadcast sent to {broadcast_count} users.")
+
+async def verify_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command to verify API connection"""
+    test_prompt = "Hello world"
+    try:
+        response = await generate_gemini_response(test_prompt)
+        if response:
+            await update.message.reply_text(f"✅ API working! Response: {response[:200]}")
+        else:
+            await update.message.reply_text("❌ API connection failed")
+    except Exception as e:
+        await update.message.reply_text(f"❌ API test failed: {str(e)}")
 
 # --- System Functions ---
 async def post_init(application: Application):
@@ -422,6 +422,7 @@ def setup_handlers(application):
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("clear", clear_history))
     application.add_handler(CommandHandler("broadcast", broadcast))
+    application.add_handler(CommandHandler("verify", verify_api))
     
     # Message handler
     application.add_handler(MessageHandler(
