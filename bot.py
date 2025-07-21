@@ -127,9 +127,11 @@ def rate_limit(func):
         return await func(update, context)
     return wrapper
 
-# --- Initialize Gemini ---
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel(GEMINI_CONFIG["model_name"])
+genai.configure(
+    api_key=GEMINI_API_KEY,
+    transport='rest',  # Explicitly set transport
+    client_options={"api_endpoint": "generativelanguage.googleapis.com"}
+)
 
 # --- Utility Functions ---
 def is_admin(user_id: int) -> bool:
